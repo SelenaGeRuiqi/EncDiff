@@ -16,7 +16,8 @@ model:
     concat_mode: False
     scale_by_std: True
     # monitor: 'val/loss_simple_ema'
-    monitor: 'train/epoch_num'
+    # monitor: 'train/epoch_num'
+    monitor: 'train/loss_simple'
     conditioning_key: crossattn
     eval_name: shapes3d
 
@@ -53,8 +54,10 @@ model:
       params:
         embed_dim: 3
         n_embed: 2048
-        monitor: "val/rec_loss"
-        ckpt_path: "pretrained_models/autoencoder.ckpt"
+        # monitor: "val/rec_loss"
+        monitor: "train/rec_loss"
+        # ckpt_path: "pretrained_models/autoencoder.ckpt"
+        ckpt_path: "/mnt/data_7tb/selena/projects/EncDiff/logs/2026-01-04T07-00-13_shapes3d_vq_4_1623/checkpoints/last.ckpt"
         ddconfig:
           double_z: false
           z_channels: 3
@@ -83,6 +86,7 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 128
+    num_workers: 8
     wrap: True
     train:
       target: ldm.data.disdata.Shapes3DTrain
@@ -116,4 +120,5 @@ lightning:
 
   trainer:
     benchmark: True
+    max_epochs: 30
     check_val_every_n_epoch: 1

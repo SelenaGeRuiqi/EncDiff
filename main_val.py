@@ -27,6 +27,9 @@ import gin
 import os
 import json
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.utils.data.dataloader")
+
 def write_text(result_dict,file):
     with open(file,'w+') as f:
         json.dump(result_dict,f)
@@ -331,7 +334,7 @@ class SetupCallback(Callback):
             ckpt_path = os.path.join(self.ckptdir, "last.ckpt")
             trainer.save_checkpoint(ckpt_path)
 
-    def on_pretrain_routine_start(self, trainer, pl_module):
+    def on_fit_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
             # Create logdirs and save configs
             os.makedirs(self.logdir, exist_ok=True)
@@ -372,7 +375,7 @@ class ImageLogger(Callback):
         self.batch_freq = batch_frequency
         self.max_images = max_images
         self.logger_log_images = {
-            pl.loggers.TestTubeLogger: self._testtube,
+            pl.loggers.CSVLogger: self._testtube,
         }
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
         if not increase_log_steps:
@@ -395,9 +398,9 @@ class ImageLogger(Callback):
             grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
 
             tag = f"{split}/{k}"
-            pl_module.logger.experiment.add_image(
-                tag, grid,
-                global_step=pl_module.global_step)
+            # pl_module.logger.experiment.add_image(
+            #     tag, grid,
+            #     global_step=pl_module.global_step)
 
     @rank_zero_only
     def log_local(self, save_dir, split, images,
@@ -463,22 +466,25 @@ class ImageLogger(Callback):
             return True
         return False
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0, **kwargs):
+        # This signature uses explicit batch and batch_idx while also accepting any extra
+        # Lightning arguments for broad compatibility.
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
-            if self.cus_logger != None:
-                if not hasattr(self.cus_logger,"start"):
+            if self.cus_logger is not None:
+                # If the custom logger is not started, initialize it with the logger's save_dir
+                if not hasattr(self.cus_logger, "start"):
                     self.cus_logger.init(pl_module.logger.save_dir)
-                # print(outputs)
-                # print(pl_module.global_step)
-                
-                self.cus_logger.log_dict(pl_module.rec_dict,pl_module.global_step)
+                # Safely get rec_dict from the pl_module (returns None if not there)
+                rec_dict = getattr(pl_module, "rec_dict", None)
+                if rec_dict is not None:
+                    self.cus_logger.log_dict(rec_dict, pl_module.global_step)
 
-    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0, **kwargs):
         pass
         # repre_np = np.concatenate(outputs, axis=0)
         # save_path = os.path.join(pl_module.logger.save_dir, "metrics")
-        # if not os.path.exists(save_path):
+        # if not os.path.exists(save_patmah):
         #     os.mkdir(save_path)
         # eval_func(self.label_dataset, repre_np, save_path, pl_module.global_step, preflix="")
         # if not self.disabled and pl_module.global_step > 0:
@@ -492,26 +498,31 @@ class CUDACallback(Callback):
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
-        torch.cuda.reset_peak_memory_stats(trainer.root_gpu)
-        torch.cuda.synchronize(trainer.root_gpu)
+        # trainer.root_gpu-->trainer.strategy.root_device.index
+            # match Lightning 1.9+
+        torch.cuda.reset_peak_memory_stats(trainer.strategy.root_device.index)
+        torch.cuda.synchronize(trainer.strategy.root_device.index)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module, outputs):
-        torch.cuda.synchronize(trainer.root_gpu)
-        max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
+    def on_train_epoch_end(self, trainer, pl_module, *args, **kwargs):
+        # Extend signature to accept *args and **kwargs for Lightning compatibility, regardless of outputs being passed
+        gpu_index = trainer.strategy.root_device.index  # Safer: store gpu index
+        torch.cuda.synchronize(gpu_index)
+        max_memory = torch.cuda.max_memory_allocated(gpu_index) / 2 ** 20
         epoch_time = time.time() - self.start_time
 
         try:
-            max_memory = trainer.training_type_plugin.reduce(max_memory)
-            epoch_time = trainer.training_type_plugin.reduce(epoch_time)
-
+            # We no longer reduce (average) across devices; if reduce throws, ignore
             rank_zero_info(f"Average Epoch time: {epoch_time:.2f} seconds")
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
-        except AttributeError:
+        except Exception:
             pass
 
 
 if __name__ == "__main__":
+    # Enable Tensor Cores for H100/A100 acceleration
+    torch.set_float32_matmul_precision('high')
+    
     # custom parser to specify config files, train, test and debug mode,
     # postfix, resume.
     # `--key value` arguments are interpreted as arguments to the trainer.
@@ -623,19 +634,35 @@ if __name__ == "__main__":
     lightning_config = config.pop("lightning", OmegaConf.create())
     # merge trainer cli with config
     trainer_config = lightning_config.get("trainer", OmegaConf.create())
-    # default to ddp
-    trainer_config["accelerator"] = "ddp"
     # trainer_config["check_val_every_n_epoch"] = "1"
     # trainer_config["val_check_interval"] = 10
     for k in nondefault_trainer_args(opt):
         trainer_config[k] = getattr(opt, k)
-    if not "gpus" in trainer_config:
-        del trainer_config["accelerator"]
-        cpu = True
-    else:
-        gpuinfo = trainer_config["gpus"]
-        print(f"Running on GPUs {gpuinfo}")
+    
+    # Handle GPU/CPU configuration for Lightning 1.9+
+    if "devices" in trainer_config or "gpus" in trainer_config:
+        # Get device count from either 'devices' (new) or 'gpus' (old)
+        if "devices" in trainer_config:
+            devices = trainer_config["devices"]
+        else:
+            devices = trainer_config.pop("gpus")  # Remove old 'gpus' key
+            trainer_config["devices"] = devices
+        
+        # Set accelerator
+        if "accelerator" not in trainer_config:
+            trainer_config["accelerator"] = "gpu"
+        
+        # Use ddp strategy for multi-gpu
+        if isinstance(devices, int) and devices > 1:
+            trainer_config["strategy"] = "ddp"
+        elif isinstance(devices, str) and len(devices.strip(",").split(",")) > 1:
+            trainer_config["strategy"] = "ddp"
+        
+        print(f"Running on GPU devices: {devices}")
         cpu = False
+    else:
+        trainer_config["accelerator"] = "cpu"
+        cpu = True
     trainer_opt = argparse.Namespace(**trainer_config)
     lightning_config.trainer = trainer_config
 
@@ -664,7 +691,7 @@ if __name__ == "__main__":
             }
         },
         "testtube": {
-            "target": "pytorch_lightning.loggers.TestTubeLogger",
+            "target": "pytorch_lightning.loggers.CSVLogger",
             "params": {
                 "name": "testtube",
                 "save_dir": logdir,
@@ -788,7 +815,11 @@ if __name__ == "__main__":
     # configure learning rate
     bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
     if not cpu:
-        ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+        devices = lightning_config.trainer.devices
+        if isinstance(devices, int):
+            ngpu = devices
+        else:
+            ngpu = len(str(devices).strip(",").split(','))
     else:
         ngpu = 1
     if 'accumulate_grad_batches' in lightning_config.trainer:

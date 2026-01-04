@@ -33,6 +33,8 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 128
+    # for H100, reduce num_workers from 256 to 8
+    num_workers: 8
     wrap: True
     train:
       target: ldm.data.disdata.Shapes3DTrain

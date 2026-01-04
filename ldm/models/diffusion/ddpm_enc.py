@@ -25,7 +25,7 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler, DDIMSamplerAttn
-from ldm.modules.diffusionmodules.vct_encoder import VCT_Encoder
+# from ldm.modules.diffusionmodules.vct_encoder import VCT_Encoder
 import os
 from main_val import eval_func
 
@@ -395,12 +395,12 @@ class DDPM(pl.LightningModule):
         # self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         # self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
-    def on_train_batch_end(self, *args, **kwargs):
+    def on_train_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0, **kwargs):
         if self.use_ema:
             self.model_ema(self.model)
 
     def on_validation_epoch_end(self, *args, **kwargs):
-        if len(self.validation_step_scalars) != 2:
+        if len(self.validation_step_scalars) > 0 and len(self.validation_step_scalars) != 2:
             repre_np = np.concatenate(self.validation_step_scalars, axis=0)
             save_path = os.path.join(self.logger.save_dir, "metrics_sin")
             if not os.path.exists(save_path):
@@ -512,9 +512,9 @@ class LatentDiffusion(DDPM):
         self.instantiate_cond_stage(cond_stage_config)
         # print(self.cond_stage_model)
 
-        if isinstance(self.cond_stage_model, VCT_Encoder):
-            self.cond_stage_model.prepare = self.encode_first_stage
-            self.cond_stage_model.pre_forward = self.get_first_stage_encoding
+        # if isinstance(self.cond_stage_model, VCT_Encoder):
+        #     self.cond_stage_model.prepare = self.encode_first_stage
+        #     self.cond_stage_model.pre_forward = self.get_first_stage_encoding
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
         self.bbox_tokenizer = None  
@@ -534,7 +534,7 @@ class LatentDiffusion(DDPM):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx=0, **kwargs):
         # only for very first batch
         
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:

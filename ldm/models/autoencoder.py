@@ -4,6 +4,10 @@ import torch.nn.functional as F
 from contextlib import contextmanager
 from ldm.modules.ema import LitEma
 
+# from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
+import sys
+import os
+sys.path.append("/mnt/data_7tb/selena/projects/EncDiff/src/taming-transformers")
 from taming.modules.vqvae.quantize import VectorQuantizer2 as VectorQuantizer
 
 from ldm.modules.diffusionmodules.model import Encoder, Decoder

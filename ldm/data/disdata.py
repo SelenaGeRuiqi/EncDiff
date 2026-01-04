@@ -13,6 +13,8 @@ import torchvision.transforms.functional as Ftran
 import PIL
 import glob
 
+import h5py
+
 
 def cartesian_product(*arrays):
     ndim = len(arrays)
@@ -44,6 +46,7 @@ class Shapes3D(Dataset):
     """
     also supports for d2c crop.
     """
+    ### modified: support .h5
     def __init__(self,
                  path,
                  original_resolution=64,
@@ -52,10 +55,21 @@ class Shapes3D(Dataset):
                  do_normalize: bool = True,
                  **kwargs):
         self.original_resolution = original_resolution
-        # self.data = BaseLMDB(path, original_resolution, zfill=7)
-        data = np.load(os.path.join(path,'3dshapes.npz'))
-
-        self.data = data["images"]
+        
+        # support .h5 and .npz
+        h5_path = os.path.join(path, 'shapes3d/3dshapes.h5')
+        npz_path = os.path.join(path, 'shapes3d/3dshapes.npz')
+        
+        if os.path.exists(h5_path):
+            import h5py
+            with h5py.File(h5_path, 'r') as f:
+                self.data = f['images'][()]
+        elif os.path.exists(npz_path):
+            data = np.load(npz_path)
+            self.data = data["images"]
+        else:
+            raise FileNotFoundError(f"Dataset not found at {h5_path} or {npz_path}")
+        
         self.length = len(self.data)
 
         if split is None:
@@ -176,10 +190,21 @@ class Shapes3D_SD(Dataset):
                  eval: bool = False,
                  **kwargs):
         self.original_resolution = original_resolution
-        # self.data = BaseLMDB(path, original_resolution, zfill=7)
-        data = np.load(os.path.join(path,'3dshapes.npz'))
-
-        self.data = data["images"]
+        
+        # support .h5 and .npz
+        h5_path = os.path.join(path, 'shapes3d/3dshapes.h5')
+        npz_path = os.path.join(path, 'shapes3d/3dshapes.npz')
+        
+        if os.path.exists(h5_path):
+            import h5py
+            with h5py.File(h5_path, 'r') as f:
+                self.data = f['images'][()]
+        elif os.path.exists(npz_path):
+            data = np.load(npz_path)
+            self.data = data["images"]
+        else:
+            raise FileNotFoundError(f"Dataset not found at {h5_path} or {npz_path}")
+        
         self.length = len(self.data)
 
         if split is None:
@@ -723,14 +748,14 @@ class Horse_lmdb(Dataset):
         
 class Shapes3DTrain(Shapes3D):
     def __init__(self, **kwargs):
-        super().__init__(path='./datasets',
+        super().__init__(path='/mnt/data_7tb/selena/datasets',
         # super().__init__(path='~/',
                 original_resolution=None,
                 **kwargs)
 
 class Shapes3DTrainSD(Shapes3D_SD):
     def __init__(self, **kwargs):
-        super().__init__(path='./datasets',
+        super().__init__(path='/mnt/data_7tb/selena/datasets',
         # super().__init__(path='~/',
                 original_resolution=None,
                 **kwargs)
@@ -744,14 +769,14 @@ class MPI3DTrainSD(MPI3D_SD):
 
 class MPI3DTrain(MPI3D):
     def __init__(self, **kwargs):
-        super().__init__(path='./datasets',
+        super().__init__(path='/mnt/data_7tb/selena/datasets',
                 original_resolution=None,
                 **kwargs)
 
 
 class Cars3DTrain(Cars3D):
     def __init__(self, **kwargs):
-        super().__init__(path='./datasets/data',
+        super().__init__(path='/mnt/data_7tb/selena/datasets',
                 original_resolution=None,
                 **kwargs)
 
