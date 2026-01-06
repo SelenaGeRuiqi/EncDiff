@@ -16,7 +16,8 @@ model:
     concat_mode: False
     scale_by_std: True
     # monitor: 'val/loss_simple_ema'
-    monitor: 'train/epoch_num'
+    # monitor: 'train/epoch_num'
+    monitor: 'train/loss_simple'
     conditioning_key: crossattn
     eval_name: mpi3d
 
@@ -54,7 +55,8 @@ model:
         embed_dim: 3
         n_embed: 2048
         monitor: "val/rec_loss"
-        ckpt_path: "pretrained_models/ckpt/mpi3d.ckpt"
+        # change
+        ckpt_path: "/mnt/data_7tb/selena/projects/EncDiff/logs/2026-01-05T03-14-10_mpi3d_vq_4_1623/checkpoints/last.ckpt"
         ddconfig:
           double_z: false
           z_channels: 3
@@ -83,6 +85,7 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 128
+    num_workers: 8
     wrap: True
     train:
       target: ldm.data.disdata.MPI3DTrain
@@ -117,3 +120,4 @@ lightning:
   trainer:
     benchmark: True
     check_val_every_n_epoch: 1
+    max_epochs: 10

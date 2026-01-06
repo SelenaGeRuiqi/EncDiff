@@ -254,7 +254,7 @@ class MPI3D(Dataset):
                  **kwargs):
         self.original_resolution = original_resolution
         # self.data = BaseLMDB(path, original_resolution, zfill=7)
-        data = np.load(os.path.join(path,"mpi3d_toy.npz"), "r")
+        data = np.load(os.path.join(path,"mpi3d/mpi3d_toy.npz"), "r")
         self.data = data["images"]
         self.length = len(self.data)
 
@@ -296,7 +296,7 @@ class MPI3D_SD(Dataset):
                  **kwargs):
         self.original_resolution = original_resolution
         # self.data = BaseLMDB(path, original_resolution, zfill=7)
-        data = np.load(os.path.join(path,"mpi_toy/mpi3d_toy.npz"), "r")
+        data = np.load(os.path.join(path,"mpi3d/mpi3d_toy.npz"), "r")
         self.data = data["images"]
         self.length = len(self.data)
         self.eval = eval
@@ -762,7 +762,7 @@ class Shapes3DTrainSD(Shapes3D_SD):
 
 class MPI3DTrainSD(MPI3D_SD):
     def __init__(self, **kwargs):
-        super().__init__(path='../../../guided-diffusion/datasets/',
+        super().__init__(path='/mnt/data_7tb/selena/datasets',
         # super().__init__(path='~/',
                 original_resolution=None,
                 **kwargs)

@@ -4,7 +4,8 @@ model:
   params:
     embed_dim: 3
     n_embed: 2048
-    monitor: 'train/epoch_num'
+    # monitor: 'train/epoch_num'
+    monitor: 'train/loss_simple'
 
     ddconfig:
       double_z: false
@@ -33,6 +34,7 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 128
+    num_workers: 8
     wrap: True
     train:
       target: ldm.data.disdata.MPI3DTrain
@@ -49,3 +51,4 @@ lightning:
   trainer:
     benchmark: True
     accumulate_grad_batches: 2
+    max_epochs: 30
