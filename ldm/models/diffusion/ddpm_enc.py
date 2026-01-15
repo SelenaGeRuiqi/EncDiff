@@ -721,7 +721,8 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None, return_false=False):
+                  cond_key=None, return_original_cond=False, bs=None, return_false=False,
+                  return_disentangled=False):  # New
         x = super().get_input(batch, k)
         if bs is not None:
             x = x[:bs]
@@ -771,16 +772,28 @@ class LatentDiffusion(DDPM):
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
         out = [z, c]
         if return_first_stage_outputs:
-            xrec = self.decode_first_stage(z)
+            # New：if need disentangled repr, use it during reconstruction
+            if return_disentangled and self.cond_stage_trainable and hasattr(self.cond_stage_model, 'encoding'):
+                dis_repr_for_rec = self.cond_stage_model.encoding(x.to(self.device))
+                xrec = self.decode_first_stage(z, disentangled_repr=dis_repr_for_rec)
+            else:
+                xrec = self.decode_first_stage(z)
             out.extend([x, xrec])
         if return_original_cond:
             out.append(xc)
         if return_false:
             out.append(cb)
+        if return_disentangled:  # New
+            # return disentangled representations
+            if self.cond_stage_trainable and hasattr(self.cond_stage_model, 'encoding'):
+                dis_repr = self.cond_stage_model.encoding(xc.to(self.device))
+                out.append(dis_repr)
+            else:
+                out.append(None)
         return out
 
     @torch.no_grad()
-    def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
+    def decode_first_stage(self, z, predict_cids=False, force_not_quantize=False, disentangled_repr=None):
         if predict_cids:
             if z.dim() == 4:
                 z = torch.argmax(z.exp(), dim=1).long()
@@ -810,9 +823,11 @@ class LatentDiffusion(DDPM):
                 z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
 
                 # 2. apply model loop over last dim
+                # New: add disentangled_repr
                 if isinstance(self.first_stage_model, VQModelInterface):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
-                                                                 force_not_quantize=predict_cids or force_not_quantize)
+                                                                 force_not_quantize=predict_cids or force_not_quantize,
+                                                                 disentangled_repr=disentangled_repr)
                                    for i in range(z.shape[-1])]
                 else:
 
@@ -837,12 +852,14 @@ class LatentDiffusion(DDPM):
             if self.first_stage_model == None:
                 return z
             if isinstance(self.first_stage_model, VQModelInterface):
-                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
+                # New：add disentangled_repr params
+                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize,
+                                                     disentangled_repr=disentangled_repr)
             else:
                 return self.first_stage_model.decode(z)
 
     # same as above but without decorator
-    def differentiable_decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
+    def differentiable_decode_first_stage(self, z, predict_cids=False, force_not_quantize=False, disentangled_repr=None):
         if predict_cids:
             if z.dim() == 4:
                 z = torch.argmax(z.exp(), dim=1).long()
@@ -874,7 +891,8 @@ class LatentDiffusion(DDPM):
                 # 2. apply model loop over last dim
                 if isinstance(self.first_stage_model, VQModelInterface):  
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
-                                                                 force_not_quantize=predict_cids or force_not_quantize)
+                                                                 force_not_quantize=predict_cids or force_not_quantize,
+                                                                 disentangled_repr=disentangled_repr)
                                    for i in range(z.shape[-1])]
                 else:
 
@@ -891,13 +909,15 @@ class LatentDiffusion(DDPM):
                 return decoded
             else:
                 if isinstance(self.first_stage_model, VQModelInterface):
-                    return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
+                    return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize,
+                                                         disentangled_repr=disentangled_repr)
                 else:
                     return self.first_stage_model.decode(z)
 
         else:
             if isinstance(self.first_stage_model, VQModelInterface):
-                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
+                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize,
+                                                     disentangled_repr=disentangled_repr)
             else:
                 return self.first_stage_model.decode(z)
 

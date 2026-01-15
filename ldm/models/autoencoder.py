@@ -33,12 +33,16 @@ class VQModel(pl.LightningModule):
                  lr_g_factor=1.0,
                  remap=None,
                  sane_index_shape=False, # tell vector quantizer to return indices as bhw
-                 use_ema=False
+                 use_ema=False,
+                 use_disentangled_concat=False,  # NEW
+                 disentangled_dim=0, # NEW
                  ):
         super().__init__()
         self.embed_dim = embed_dim
         self.n_embed = n_embed
         self.image_key = image_key
+        self.use_disentangled_concat = use_disentangled_concat  # NEW
+        self.disentangled_dim = disentangled_dim # NEW
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
         self.loss = instantiate_from_config(lossconfig)
@@ -46,7 +50,10 @@ class VQModel(pl.LightningModule):
                                         remap=remap,
                                         sane_index_shape=sane_index_shape)
         self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        # self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        # NEW: modify post_quant_conv dim depending on using concat or not
+        post_quant_in_channels = embed_dim + disentangled_dim if use_disentangled_concat else embed_dim
+        self.post_quant_conv = torch.nn.Conv2d(post_quant_in_channels, ddconfig["z_channels"], 1)
         if colorize_nlabels is not None:
             assert type(colorize_nlabels)==int
             self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
@@ -82,17 +89,51 @@ class VQModel(pl.LightningModule):
                     print(f"{context}: Restored training weights")
 
     def init_from_ckpt(self, path, ignore_keys=list()):
+        """
+        Added special handling for loading post_quant_conv weights if the input channels have changed
+        due to use_disentangled_concat.
+        * If self.use_disentangled_concat is True and the checkpoint's post_quant_conv.weight does not match
+            the shape of the new model's post_quant_conv.weight (because of additional disentangled_dim channels),
+            the old weights are retained for the matching input channels.
+        * The new extra channels are initialized using Xavier uniform initialization.
+        * Handles the post_quant_conv.bias by leaving it unchanged as bias shape generally does not depend on input channels.
+        """
+
         sd = torch.load(path, map_location="cpu")["state_dict"]
         keys = list(sd.keys())
+
+        # Handle shape mismatch for post_quant_conv if the input channel count changed
+        if self.use_disentangled_concat and 'post_quant_conv.weight' in sd:
+            old_weight = sd['post_quant_conv.weight']  # Shape: (z_channels, embed_dim, 1, 1)
+            old_shape = old_weight.shape
+            new_shape = self.post_quant_conv.weight.shape  # (z_channels, embed_dim+disentangled_dim, 1, 1)
+
+            if old_shape[1] != new_shape[1]:  # Input channel count is different
+                print(f"⚠️  post_quant_conv input channels mismatch: {old_shape[1]} -> {new_shape[1]}")
+                print(f"   Keeping old weights for first {old_shape[1]} channels")
+                print(f"   Initializing new {new_shape[1] - old_shape[1]} channels with Xavier uniform")
+
+                # Create a new weight tensor with the updated shape
+                new_weight = torch.nn.init.xavier_uniform_(torch.zeros(new_shape))
+                # Copy weights from old checkpoint for the channels that existed
+                new_weight[:, :old_shape[1], :, :] = old_weight
+                sd['post_quant_conv.weight'] = new_weight
+
+                # For bias: leave as is since bias dimension does not change with input channels
+                if 'post_quant_conv.bias' in sd:
+                    pass
+
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
+
         missing, unexpected = self.load_state_dict(sd, strict=False)
         print(f"Restored from {path} with {len(missing)} missing and {len(unexpected)} unexpected keys")
         if len(missing) > 0:
             print(f"Missing Keys: {missing}")
+        if len(unexpected) > 0:
             print(f"Unexpected Keys: {unexpected}")
 
     def on_train_batch_end(self, *args, **kwargs):
@@ -274,13 +315,56 @@ class VQModelInterface(VQModel):
         h = self.quant_conv(h)
         return h
 
-    def decode(self, h, force_not_quantize=False):
-        # also go through quantization layer
+    # def decode(self, h, force_not_quantize=False):
+    #     # also go through quantization layer
+    #     if not force_not_quantize:
+    #         quant, emb_loss, info = self.quantize(h)
+    #     else:
+    #         quant = h
+    #     quant = self.post_quant_conv(quant)
+    #     dec = self.decoder(quant)
+    #     return dec
+    
+    def decode(self, h, force_not_quantize=False, disentangled_repr=None):
+        """
+        Decode latent to image.
+        
+        Args:
+            h: (batch, embed_dim, H, W) - latent from U-Net
+            force_not_quantize: if True, skip VQ quantization
+            disentangled_repr: (batch, N) - optional disentangled representations to concat
+        
+        Returns:
+            dec: (batch, 3, 64, 64) - decoded image
+        """
+        # Quantization (optional)
         if not force_not_quantize:
             quant, emb_loss, info = self.quantize(h)
         else:
             quant = h
+        
+        # Concat disentangled representations if using concat mode
+        if self.use_disentangled_concat:
+            B, _, H, W = quant.shape
+            
+            if disentangled_repr is not None:
+                # Case 1: disentangled_repr provided - use it
+                N = disentangled_repr.shape[1]
+                s_expanded = disentangled_repr[:, :, None, None].expand(-1, -1, H, W)
+            else:
+                # Case 2: disentangled_repr NOT provided - use zeros
+                N = self.disentangled_dim
+                s_expanded = torch.zeros(B, N, H, W, device=quant.device, dtype=quant.dtype)
+            
+            # Concat along channel dimension
+            # quant: (batch, embed_dim, H, W) + s_expanded: (batch, N, H, W)
+            # -> (batch, embed_dim+N, H, W)
+            quant = torch.cat([quant, s_expanded], dim=1)
+        
+        # Post-quantization conv
         quant = self.post_quant_conv(quant)
+        
+        # Decoder
         dec = self.decoder(quant)
         return dec
 

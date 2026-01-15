@@ -54,6 +54,8 @@ model:
       params:
         embed_dim: 3
         n_embed: 2048
+        use_disentangled_concat: true   # New：use concat
+        disentangled_dim: 20             # New：N=20（from latent_unit）
         # monitor: "val/rec_loss"
         monitor: "train/rec_loss"
         # ckpt_path: "pretrained_models/autoencoder.ckpt"
@@ -120,5 +122,5 @@ lightning:
 
   trainer:
     benchmark: True
-    max_epochs: 30
+    max_epochs: 10
     check_val_every_n_epoch: 1

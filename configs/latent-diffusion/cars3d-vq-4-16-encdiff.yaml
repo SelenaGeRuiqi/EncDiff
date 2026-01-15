@@ -53,6 +53,8 @@ model:
       params:
         embed_dim: 3
         n_embed: 2048
+        use_disentangled_concat: true   # New
+        disentangled_dim: 20             # New: latent_unit=20
         monitor: "val/rec_loss"
         # change
         ckpt_path: "/mnt/data_7tb/selena/projects/EncDiff/logs/2026-01-04T20-18-26_cars3d_vq_4_1623/checkpoints/last.ckpt"
@@ -118,5 +120,5 @@ lightning:
 
   trainer:
     benchmark: True
-    check_val_every_n_epoch: 2
-    max_epochs: 30
+    check_val_every_n_epoch: 1
+    max_epochs: 15
