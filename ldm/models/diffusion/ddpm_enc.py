@@ -28,6 +28,7 @@ from ldm.models.diffusion.ddim import DDIMSampler, DDIMSamplerAttn
 # from ldm.modules.diffusionmodules.vct_encoder import VCT_Encoder
 import os
 from main_val import eval_func
+from ldm.models.diffusion.mcl_utils import MLPProj, mcl_infonce_loss
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -308,12 +309,12 @@ class DDPM(pl.LightningModule):
 
         return loss
 
-    def p_losses(self, x_start, t, noise=None):
+    def p_losses(self, x_start, cond, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_out = self.model(x_noisy, t)
-
         loss_dict = {}
+
         if self.parameterization == "eps":
             target = noise
         elif self.parameterization == "x0":
@@ -402,13 +403,13 @@ class DDPM(pl.LightningModule):
     def on_validation_epoch_end(self, *args, **kwargs):
         if len(self.validation_step_scalars) > 0 and len(self.validation_step_scalars) != 2:
             repre_np = np.concatenate(self.validation_step_scalars, axis=0)
-            save_path = os.path.join(self.logger.save_dir, "metrics_sin")
+            save_path = os.path.join(self.trainer.logdir, "metrics_sin")
             if not os.path.exists(save_path):
                 os.mkdir(save_path)
             value_dict = eval_func(self.label_dataset, repre_np, save_path, self.global_step, preflix="")
         elif len(self.validation_step_outputs) != 2:
             repre_np = np.concatenate(self.validation_step_outputs, axis=0)
-            save_path = os.path.join(self.logger.save_dir, "metrics")
+            save_path = os.path.join(self.trainer.logdir, "metrics")
             if not os.path.exists(save_path):
                 os.mkdir(save_path)
             value_dict = eval_func(self.label_dataset, repre_np, save_path, self.global_step, preflix="")
@@ -485,6 +486,11 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
+                 # new_loss: new mcl params 
+                 lambda_mcl=0.0,           # MCL loss权重
+                 mcl_tau=0.1,              # InfoNCE temperature
+                 mcl_proj_dim=128,         # Projection输出维度
+                 use_mcl=False,            # 是否使用MCL
                  *args, **kwargs):
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
@@ -526,6 +532,32 @@ class LatentDiffusion(DDPM):
         # self.logvar.cuda()
         self.validation_step_outputs = []
         self.validation_step_scalars = []
+        
+        # new_loss: MCL related parameters
+        self.lambda_mcl = lambda_mcl
+        self.mcl_tau = mcl_tau
+        self.use_mcl = use_mcl
+
+        if self.use_mcl and self.lambda_mcl > 0:
+            z_channels = first_stage_config.params.ddconfig.z_channels
+            latent_size = self.image_size  # use self.image_size
+            pi_g_in_dim = z_channels * latent_size * latent_size
+            self.Pi_g = MLPProj(in_dim=pi_g_in_dim, out_dim=mcl_proj_dim, layernorm=True)
+            
+            # obtain from cond_stage_model or from config
+            if hasattr(self.cond_stage_model, 'latent_unit'):
+                latent_unit = self.cond_stage_model.latent_unit
+                context_dim = self.cond_stage_model.context_dim
+            else:
+                latent_unit = cond_stage_config.params.latent_unit
+                context_dim = cond_stage_config.params.context_dim
+            
+            pi_u_in_dim = latent_unit * context_dim
+            self.Pi_u = MLPProj(in_dim=pi_u_in_dim, out_dim=mcl_proj_dim, layernorm=False)
+            
+            print(f"[MCL] Initialized with lambda_mcl={lambda_mcl}, tau={mcl_tau}")
+            print(f"[MCL] Pi_g: {pi_g_in_dim} -> {mcl_proj_dim}")
+            print(f"[MCL] Pi_u: {pi_u_in_dim} -> {mcl_proj_dim}")
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -1111,7 +1143,6 @@ class LatentDiffusion(DDPM):
     def p_losses(self, x_start, cond, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        # import pdb; pdb.set_trace()
         model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
@@ -1128,10 +1159,8 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
         self.logvar = self.logvar.cuda()
 
-
         logvar_t = self.logvar[t].to(self.device)
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
-        # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
             loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
             loss_dict.update({'logvar': self.logvar.data.mean()})
@@ -1142,9 +1171,41 @@ class LatentDiffusion(DDPM):
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
+
+        # ===== MCL loss =====
+        if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0:
+            u = cond  # (B, 20, 16)
+            u_flat = u.reshape(u.shape[0], -1)  # (B, 320) for Pi_u and mech_score_mse
+            
+            def decoder_G(z, u_cond):
+                # u_cond is (B, 320), need to convert to (B, 20) for decoder
+                # Reshape to (B, 20, 16) then take mean over context_dim
+                u_for_decoder = u_cond.reshape(z.shape[0], 20, 16).mean(dim=2)  # (B, 20)
+                return self.differentiable_decode_first_stage(
+                    z, 
+                    disentangled_repr=u_for_decoder
+                )
+            
+            def concept_encoder_fn(x):
+                c = self.get_learned_conditioning(x)
+                return c.reshape(c.shape[0], -1)  # flatten to (B, 320)
+            
+            mcl_loss = mcl_infonce_loss(
+                decoder_G=decoder_G,
+                concept_encoder=concept_encoder_fn,
+                Pi_g=self.Pi_g,
+                Pi_u=self.Pi_u,
+                z=x_start,
+                u=u_flat,
+                tau=self.mcl_tau,
+                create_graph_mcl=True
+            )
+            
+            loss_dict.update({f'{prefix}/loss_mcl': mcl_loss.detach()})
+            loss = loss + self.lambda_mcl * mcl_loss
+
         loss_dict.update({f'{prefix}/loss': loss})
         loss_dict.update({f'{prefix}/epoch_num': self.current_epoch})
-        
 
         return loss, loss_dict
 
@@ -1497,6 +1558,13 @@ class LatentDiffusion(DDPM):
         if self.cond_stage_trainable:
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())
+
+        # new_loss: Add MCL
+        if getattr(self, "use_mcl", False) and getattr(self, "lambda_mcl", 0) > 0:
+            print(f"{self.__class__.__name__}: Also optimizing MCL projection params!")
+            params = params + list(self.Pi_g.parameters())
+            params = params + list(self.Pi_u.parameters())
+
         if self.learn_logvar:
             print('Diffusion model optimizing logvar')
             params.append(self.logvar)

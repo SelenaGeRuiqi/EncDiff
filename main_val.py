@@ -19,6 +19,7 @@ from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
+from swap_training_end import SwapVisualizationCallback
 
 from sklearn.decomposition import PCA
 import numpy as np
@@ -446,7 +447,7 @@ class ImageLogger(Callback):
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -1., 1.)
 
-            self.log_local(pl_module.logger.save_dir, split, images,
+            self.log_local(pl_module.trainer.logdir, split, images,
                            pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
@@ -472,9 +473,9 @@ class ImageLogger(Callback):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
             if self.cus_logger is not None:
-                # If the custom logger is not started, initialize it with the logger's save_dir
+                # If the custom logger is not started, initialize it with the experiment's logdir
                 if not hasattr(self.cus_logger, "start"):
-                    self.cus_logger.init(pl_module.logger.save_dir)
+                    self.cus_logger.init(trainer.logdir)
                 # Safely get rec_dict from the pl_module (returns None if not there)
                 rec_dict = getattr(pl_module, "rec_dict", None)
                 if rec_dict is not None:
@@ -704,6 +705,8 @@ if __name__ == "__main__":
     else:
         logger_cfg = OmegaConf.create()
     logger_cfg = OmegaConf.merge(default_logger_cfg, logger_cfg)
+    # Convert entire logger_cfg to plain dict for wandb compatibility
+    logger_cfg = OmegaConf.to_container(logger_cfg, resolve=True)
     trainer_kwargs["logger"] = instantiate_from_config(logger_cfg)
 
     # modelcheckpoint - use TrainResult/EvalResult(checkpoint_on=metric) to
