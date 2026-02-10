@@ -119,6 +119,22 @@ lightning:
         log_to_wandb: true
         factors_per_page: 10
 
+    best_vae_checkpoint:
+      target: pytorch_lightning.callbacks.ModelCheckpoint
+      params:
+        monitor: "val/factor_vae_score"
+        mode: max
+        filename: "best_vae_{epoch:03d}_{val/factor_vae_score:.4f}"
+        save_top_k: 1
+
+    best_dci_checkpoint:
+      target: pytorch_lightning.callbacks.ModelCheckpoint
+      params:
+        monitor: "val/dci_disentanglement"
+        mode: max
+        filename: "best_dci_{epoch:03d}_{val/dci_disentanglement:.4f}"
+        save_top_k: 1
+
   trainer:
     benchmark: True
     max_epochs: 3

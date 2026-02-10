@@ -407,14 +407,20 @@ class DDPM(pl.LightningModule):
             if not os.path.exists(save_path):
                 os.mkdir(save_path)
             value_dict = eval_func(self.label_dataset, repre_np, save_path, self.global_step, preflix="")
+            if "factor_VAE" in value_dict and "eval_accuracy" in value_dict["factor_VAE"]:
+                self.log("val/factor_vae_score", value_dict["factor_VAE"]["eval_accuracy"], sync_dist=True)
+            if "dci" in value_dict and "disentanglement" in value_dict["dci"]:
+                self.log("val/dci_disentanglement", value_dict["dci"]["disentanglement"], sync_dist=True)
         elif len(self.validation_step_outputs) != 2:
             repre_np = np.concatenate(self.validation_step_outputs, axis=0)
             save_path = os.path.join(self.trainer.logdir, "metrics")
             if not os.path.exists(save_path):
                 os.mkdir(save_path)
             value_dict = eval_func(self.label_dataset, repre_np, save_path, self.global_step, preflix="")
-        
-            # self.log('val/loss_simple_ema', value_dict['dci'])
+            if "factor_VAE" in value_dict and "eval_accuracy" in value_dict["factor_VAE"]:
+                self.log("val/factor_vae_score", value_dict["factor_VAE"]["eval_accuracy"], sync_dist=True)
+            if "dci" in value_dict and "disentanglement" in value_dict["dci"]:
+                self.log("val/dci_disentanglement", value_dict["dci"]["disentanglement"], sync_dist=True)
         self.validation_step_outputs.clear()
         self.validation_step_scalars.clear()
         
