@@ -1007,6 +1007,20 @@ class LatentDiffusion(DDPM):
         loss = self(x, c)
         return loss
 
+    def on_before_optimizer_step(self, optimizer, *args, **kwargs):
+        """Log gradient norms after backward, before optimizer step."""
+        if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0:
+            # UNet gradient norm
+            unet_params = [p for p in self.model.diffusion_model.parameters() if p.grad is not None]
+            if unet_params:
+                unet_grad_norm = torch.sqrt(sum(p.grad.data.norm() ** 2 for p in unet_params))
+                self.log('train/grad_norm_unet', unet_grad_norm, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+            # MCL projector gradient norm
+            mcl_params = [p for p in list(self.Pi_g.parameters()) + list(self.Pi_u.parameters()) if p.grad is not None]
+            if mcl_params:
+                mcl_grad_norm = torch.sqrt(sum(p.grad.data.norm() ** 2 for p in mcl_params))
+                self.log('train/grad_norm_mcl', mcl_grad_norm, prog_bar=False, logger=True, on_step=True, on_epoch=False)
+
     def forward(self, x, c, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         if self.model.conditioning_key is not None:
@@ -1209,6 +1223,11 @@ class LatentDiffusion(DDPM):
             
             loss_dict.update({f'{prefix}/loss_mcl': mcl_loss.detach()})
             loss = loss + self.lambda_mcl * mcl_loss
+            # Log MCL/diffusion ratio for gradient collapse detection
+            with torch.no_grad():
+                loss_simple_val = loss_dict[f'{prefix}/loss_simple']
+                if loss_simple_val > 0:
+                    loss_dict.update({f'{prefix}/mcl_diffusion_ratio': mcl_loss.detach() / loss_simple_val})
 
         loss_dict.update({f'{prefix}/loss': loss})
         loss_dict.update({f'{prefix}/epoch_num': self.current_epoch})
