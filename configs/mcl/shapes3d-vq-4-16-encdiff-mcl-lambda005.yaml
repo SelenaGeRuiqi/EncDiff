@@ -19,10 +19,14 @@ model:
     conditioning_key: crossattn
     eval_name: shapes3d
     
-    # MCL parameters
+    # MCL parameters (unified API)
     lambda_mcl: 0.05
     mcl_tau: 0.1
     mcl_proj_dim: 128
+    mcl_sigma: 0.1
+    mcl_neg_mode: "shuffle_u"
+    mcl_type: "infonce_mechgrad"
+    mcl_critic_mode: "concept_encoder"
     use_mcl: true
 
     scheduler_config:

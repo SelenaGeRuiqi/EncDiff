@@ -18,9 +18,9 @@ model:
     monitor: 'train/loss_simple'
     conditioning_key: crossattn
     eval_name: mpi3d
-    
+
     # MCL parameters (unified API)
-    lambda_mcl: 0.5
+    lambda_mcl: 0.01
     mcl_tau: 0.1
     mcl_proj_dim: 128
     mcl_sigma: 0.1
@@ -134,11 +134,11 @@ lightning:
     benchmark: True
     max_epochs: 3
     check_val_every_n_epoch: 1
-    
+
   logger:
     target: pytorch_lightning.loggers.WandbLogger
     params:
-      name: "mpi3d-mcl-lambda0.5-explore"
+      name: "mpi3d-mcl-lambda0.01-explore"
       project: "EncDiff-MCL"
       entity: "sege-uc-san-diego"
       save_dir: "logs/"
@@ -146,6 +146,6 @@ lightning:
       log_model: False
       config:
         dataset: "MPI3D"
-        lambda_mcl: 0.5
+        lambda_mcl: 0.01
         architecture: "EncDiff"
         experiment_type: "explore"
