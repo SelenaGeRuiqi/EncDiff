@@ -1051,6 +1051,10 @@ class LatentDiffusion(DDPM):
         if self.model.conditioning_key is not None:
             assert c is not None
             if self.cond_stage_trainable:
+                # Before warping, extract exact disentangled repr for MCL decoder
+                if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0 \
+                        and hasattr(self.cond_stage_model, 'encoding'):
+                    self._mcl_disentangled_repr = self.cond_stage_model.encoding(c)  # (B, 20)
                 c = self.get_learned_conditioning(c)
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
@@ -1220,23 +1224,17 @@ class LatentDiffusion(DDPM):
         # ===== MCL loss (unified API) =====
         if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0:
             # cond shape: (B, latent_unit * context_dim) = (B, 320) from Encoder4.forward()
-            # This is the warped concept representation used for cross-attention.
-            u_warped = cond  # (B, 320)
+            u_warped = cond  # (B, 320) — used for Pi_u contrastive key and critic
 
-            # For decoder_G, we need the raw disentangled repr u (B, 20), not the
-            # warped version. Encoder4.encoding(image) -> (B, 20).
-            # However, we don't have the original image here, so we recover u from
-            # the warped representation by reshaping (B, 320) -> (B, 20, 16) and
-            # taking mean over context_dim. This is an approximation.
-            _latent_unit = self.cond_stage_model.latent_unit   # 20
-            _context_dim = self.cond_stage_model.context_dim   # 16
+            # Exact disentangled repr (B, 20) computed in forward() before warping.
+            # This is what VQ-VAE decoder was trained on — no approximation needed.
+            _disentangled_repr = self._mcl_disentangled_repr  # (B, 20)
 
             def decoder_G(z, u_cond):
-                # u_cond: (B, 320) -> reshape to (B, 20, 16) -> mean -> (B, 20)
-                u_for_decoder = u_cond.reshape(z.shape[0], _latent_unit, _context_dim).mean(dim=2)
+                # Ignore u_cond; use the exact disentangled repr captured from forward()
                 return self.differentiable_decode_first_stage(
                     z,
-                    disentangled_repr=u_for_decoder
+                    disentangled_repr=_disentangled_repr
                 )
 
             # Build critic (concept_encoder mode creates it lazily)
