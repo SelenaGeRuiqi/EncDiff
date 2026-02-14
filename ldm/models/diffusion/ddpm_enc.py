@@ -1219,13 +1219,20 @@ class LatentDiffusion(DDPM):
 
         # ===== MCL loss (unified API) =====
         if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0:
-            u = cond  # (B, 20, 16)
-            u_flat = u.reshape(u.shape[0], -1)  # (B, 320) for Pi_u and critic
+            # cond shape: (B, latent_unit * context_dim) = (B, 320) from Encoder4.forward()
+            # This is the warped concept representation used for cross-attention.
+            u_warped = cond  # (B, 320)
 
-            _latent_unit = u.shape[1]  # 20
-            _context_dim = u.shape[2]  # 16
+            # For decoder_G, we need the raw disentangled repr u (B, 20), not the
+            # warped version. Encoder4.encoding(image) -> (B, 20).
+            # However, we don't have the original image here, so we recover u from
+            # the warped representation by reshaping (B, 320) -> (B, 20, 16) and
+            # taking mean over context_dim. This is an approximation.
+            _latent_unit = self.cond_stage_model.latent_unit   # 20
+            _context_dim = self.cond_stage_model.context_dim   # 16
 
             def decoder_G(z, u_cond):
+                # u_cond: (B, 320) -> reshape to (B, 20, 16) -> mean -> (B, 20)
                 u_for_decoder = u_cond.reshape(z.shape[0], _latent_unit, _context_dim).mean(dim=2)
                 return self.differentiable_decode_first_stage(
                     z,
@@ -1245,7 +1252,7 @@ class LatentDiffusion(DDPM):
                 loss_type=self.mcl_type,
                 decoder_G=decoder_G,
                 z=x_start,
-                u_key=u_flat,
+                u_key=u_warped,
                 u_for_G=None,
                 critic=critic,
                 Pi_g=self.Pi_g,
