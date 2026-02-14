@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from collections import OrderedDict
 
 from ldm.models.diffusion.mcl_utils import (
-    MLPProj, MechanismCritic, ConceptEncoderCritic, mcl_loss
+    MLPProj, MechanismCritic, mcl_loss
 )
 
 
@@ -112,8 +112,8 @@ class DummyLatentDiffusion(nn.Module):
         # MCL modules (NOT in pre-MCL checkpoint)
         if add_mcl:
             self.Pi_g = MLPProj(in_dim=3*16*16, out_dim=128, layernorm=True)
-            self.Pi_u = MLPProj(in_dim=20*16, out_dim=128, layernorm=False)
-            self.mcl_critic = MechanismCritic(z_shape=(3, 16, 16), u_dim=20*16, hidden=256)
+            self.Pi_u = MLPProj(in_dim=20, out_dim=128, layernorm=False)
+            self.mcl_critic = MechanismCritic(z_shape=(3, 16, 16), u_dim=20, hidden=256)
 
 
 # =========================================================================
@@ -336,77 +336,56 @@ def run_gradient_tests():
         assert dis_repr.grad is not None and dis_repr.grad.abs().sum() > 0
     run_test("simultaneous gradient flow to z and disentangled_repr", test_simultaneous_grad_flow)
 
-    # ── Test 6: Full MCL pipeline — Pi_g/Pi_u get grads through frozen decoder ──
+    # ── Test 6: Full MCL pipeline — Pi_g/Pi_u/critic get grads through frozen decoder ──
     def test_mcl_full_pipeline_gradient():
         """
         End-to-end: MCL loss -> backward through frozen VQ-VAE.
-        Verifies Pi_g and Pi_u receive gradients. The z_ input gets gradients
-        via autograd.grad inside mcl_loss, proving the frozen decoder is transparent.
-
-        Note: encoder4 does NOT receive gradients here because:
-        - u_key is detached (no grad path through Pi_u to encoder4)
-        - infonce_mechgrad uses autograd.grad(s, z_) which computes ds/dz_,
-          and with create_graph=False the result is detached from encoder4's graph
-        - Encoder4 gets its training signal from the diffusion loss, not MCL
+        Uses MechanismCritic (senior's design), all components use u (B, 20).
         """
-        encoder4 = DummyEncoder4(latent_unit=LATENT_UNIT, context_dim=16)
         Pi_g = MLPProj(in_dim=3*16*16, out_dim=128, layernorm=True)
-        Pi_u = MLPProj(in_dim=LATENT_UNIT*16, out_dim=128, layernorm=False)
+        Pi_u = MLPProj(in_dim=LATENT_UNIT, out_dim=128, layernorm=False)
+        critic = MechanismCritic(z_shape=(3, 16, 16), u_dim=LATENT_UNIT, hidden=256)
 
-        # Simulate forward(): encoding before warping
-        dummy_img = torch.randn(B, 3, 64, 64)
-        disentangled_repr = encoder4.encoding(dummy_img)  # (B, 20)
-        cond = encoder4(dummy_img)  # (B, 320) warped
-
+        u_mcl = torch.randn(B, LATENT_UNIT)  # (B, 20)
         z = torch.randn(B, 3, 16, 16)
-        _dis = disentangled_repr.detach()  # detached, same as real p_losses
 
         def decoder_G(z_, u_cond):
-            return vq_decoder.decode(z_, disentangled_repr=_dis)
-
-        def concept_encoder_fn(x):
-            return encoder4(x).reshape(x.shape[0], -1)
-        critic = ConceptEncoderCritic(concept_encoder_fn)
+            return vq_decoder.decode(z_, disentangled_repr=u_cond)
 
         # Zero grads
         Pi_g.zero_grad(set_to_none=True)
         Pi_u.zero_grad(set_to_none=True)
+        critic.zero_grad(set_to_none=True)
 
         loss_val = mcl_loss(
             loss_type="infonce_mechgrad",
             decoder_G=decoder_G,
             z=z,
-            u_key=cond.detach(),  # (B, 320)
+            u_key=u_mcl,  # (B, 20) for everything
             u_for_G=None,
             critic=critic,
             Pi_g=Pi_g, Pi_u=Pi_u,
             tau=0.1, sigma=0.1,
             neg_mode="shuffle_u",
-            create_graph=False,
+            create_graph=True,  # same as real training (ddpm_enc.py p_losses)
         )
         assert torch.isfinite(loss_val), f"MCL loss not finite: {loss_val.item()}"
         loss_val.backward()
 
-        # Check Pi_g received gradients
-        pig_has_grad = any(
-            p.grad is not None and p.grad.abs().sum() > 0
-            for p in Pi_g.parameters()
-        )
-        assert pig_has_grad, "Pi_g has no gradients"
-
-        # Check Pi_u received gradients
-        piu_has_grad = any(
-            p.grad is not None and p.grad.abs().sum() > 0
-            for p in Pi_u.parameters()
-        )
-        assert piu_has_grad, "Pi_u has no gradients"
+        # Check Pi_g, Pi_u, critic received gradients
+        for name, module in [("Pi_g", Pi_g), ("Pi_u", Pi_u), ("critic", critic)]:
+            has_grad = any(
+                p.grad is not None and p.grad.abs().sum() > 0
+                for p in module.parameters()
+            )
+            assert has_grad, f"{name} has no gradients"
 
         # Check VQ-VAE is still frozen (no param grads)
         for name, param in vq_decoder.named_parameters():
             assert param.grad is None, \
                 f"Frozen VQ-VAE param {name} received gradient during MCL backward"
 
-    run_test("full MCL pipeline: Pi_g/Pi_u grads flow, VQ-VAE stays frozen", test_mcl_full_pipeline_gradient)
+    run_test("full MCL pipeline: Pi_g/Pi_u/critic grads flow, VQ-VAE stays frozen", test_mcl_full_pipeline_gradient)
 
     # ── Test 6b: Encoder gets grads through frozen decoder via direct loss ──
     def test_encoder_grad_through_frozen_decoder():

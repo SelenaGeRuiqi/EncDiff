@@ -28,7 +28,7 @@ from ldm.models.diffusion.ddim import DDIMSampler, DDIMSamplerAttn
 # from ldm.modules.diffusionmodules.vct_encoder import VCT_Encoder
 import os
 from main_val import eval_func
-from ldm.models.diffusion.mcl_utils import MLPProj, MechanismCritic, ConceptEncoderCritic, mcl_loss
+from ldm.models.diffusion.mcl_utils import MLPProj, MechanismCritic, mcl_loss
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -499,7 +499,6 @@ class LatentDiffusion(DDPM):
                  mcl_sigma=0.1,
                  mcl_neg_mode="shuffle_u",
                  mcl_type="infonce_mechgrad",
-                 mcl_critic_mode="concept_encoder",
                  use_mcl=False,
                  *args, **kwargs):
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
@@ -549,7 +548,6 @@ class LatentDiffusion(DDPM):
         self.mcl_sigma = mcl_sigma
         self.mcl_neg_mode = mcl_neg_mode
         self.mcl_type = mcl_type
-        self.mcl_critic_mode = mcl_critic_mode
         self.use_mcl = use_mcl
 
         if self.use_mcl and self.lambda_mcl > 0:
@@ -557,35 +555,28 @@ class LatentDiffusion(DDPM):
             latent_size = self.image_size
             pi_g_in_dim = z_channels * latent_size * latent_size
 
-            # obtain concept dimensions from cond_stage_model or config
+            # obtain u_dim from cond_stage_model or config
             if hasattr(self.cond_stage_model, 'latent_unit'):
                 latent_unit = self.cond_stage_model.latent_unit
-                context_dim = self.cond_stage_model.context_dim
             else:
                 latent_unit = cond_stage_config.params.latent_unit
-                context_dim = cond_stage_config.params.context_dim
-            pi_u_in_dim = latent_unit * context_dim
+            u_dim = latent_unit  # MCL uses raw (B, 20) disentangled repr as u
 
-            # Pi_g and Pi_u: needed for infonce_mechgrad and jacobian_vjp_infonce
+            # Pi_g and Pi_u (same as senior's test: Pi_u takes u_dim, not warped dim)
             self.Pi_g = MLPProj(in_dim=pi_g_in_dim, out_dim=mcl_proj_dim, layernorm=True)
-            self.Pi_u = MLPProj(in_dim=pi_u_in_dim, out_dim=mcl_proj_dim, layernorm=False)
+            self.Pi_u = MLPProj(in_dim=u_dim, out_dim=mcl_proj_dim, layernorm=False)
 
-            # Critic: needed for nce_logistic, infonce_mechgrad, fisher_sm, denoise_sm
-            if mcl_critic_mode == "concept_encoder":
-                # Will be created at forward time (wraps cond_stage_model)
-                self.mcl_critic = None
-            elif mcl_critic_mode == "mechanism_critic":
-                self.mcl_critic = MechanismCritic(
-                    z_shape=(z_channels, latent_size, latent_size),
-                    u_dim=pi_u_in_dim,
-                )
-            else:
-                raise ValueError(f"Unknown mcl_critic_mode: {mcl_critic_mode}")
+            # MechanismCritic: learned critic(x_hat, z, u) as in senior's code
+            self.mcl_critic = MechanismCritic(
+                z_shape=(z_channels, latent_size, latent_size),
+                u_dim=u_dim,
+            )
 
             print(f"[MCL] Initialized: type={mcl_type}, lambda={lambda_mcl}, tau={mcl_tau}, sigma={mcl_sigma}")
-            print(f"[MCL] critic_mode={mcl_critic_mode}, neg_mode={mcl_neg_mode}")
+            print(f"[MCL] neg_mode={mcl_neg_mode}")
             print(f"[MCL] Pi_g: {pi_g_in_dim} -> {mcl_proj_dim}")
-            print(f"[MCL] Pi_u: {pi_u_in_dim} -> {mcl_proj_dim}")
+            print(f"[MCL] Pi_u: {u_dim} -> {mcl_proj_dim}")
+            print(f"[MCL] MechanismCritic: z_shape=({z_channels},{latent_size},{latent_size}), u_dim={u_dim}")
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -1223,36 +1214,23 @@ class LatentDiffusion(DDPM):
 
         # ===== MCL loss (unified API) =====
         if getattr(self, 'use_mcl', False) and getattr(self, 'lambda_mcl', 0) > 0:
-            # cond shape: (B, latent_unit * context_dim) = (B, 320) from Encoder4.forward()
-            u_warped = cond  # (B, 320) — used for Pi_u contrastive key and critic
-
-            # Exact disentangled repr (B, 20) computed in forward() before warping.
-            # This is what VQ-VAE decoder was trained on — no approximation needed.
-            _disentangled_repr = self._mcl_disentangled_repr  # (B, 20)
+            # u = exact disentangled repr (B, 20), computed in forward() before warping.
+            # All MCL components (decoder_G, critic, Pi_u) use the same u,
+            # following the senior's unified design.
+            u_mcl = self._mcl_disentangled_repr  # (B, 20)
 
             def decoder_G(z, u_cond):
-                # Ignore u_cond; use the exact disentangled repr captured from forward()
                 return self.differentiable_decode_first_stage(
-                    z,
-                    disentangled_repr=_disentangled_repr
+                    z, disentangled_repr=u_cond
                 )
-
-            # Build critic (concept_encoder mode creates it lazily)
-            if getattr(self, 'mcl_critic', None) is None and self.mcl_critic_mode == "concept_encoder":
-                def concept_encoder_fn(x):
-                    c = self.get_learned_conditioning(x)
-                    return c.reshape(c.shape[0], -1)
-                critic = ConceptEncoderCritic(concept_encoder_fn)
-            else:
-                critic = self.mcl_critic
 
             mcl_loss_val = mcl_loss(
                 loss_type=self.mcl_type,
                 decoder_G=decoder_G,
                 z=x_start,
-                u_key=u_warped,
+                u_key=u_mcl,
                 u_for_G=None,
-                critic=critic,
+                critic=self.mcl_critic,
                 Pi_g=self.Pi_g,
                 Pi_u=self.Pi_u,
                 tau=self.mcl_tau,
@@ -1629,8 +1607,7 @@ class LatentDiffusion(DDPM):
             print(f"{self.__class__.__name__}: Also optimizing MCL params (type={self.mcl_type})!")
             params = params + list(self.Pi_g.parameters())
             params = params + list(self.Pi_u.parameters())
-            if getattr(self, 'mcl_critic', None) is not None:
-                params = params + list(self.mcl_critic.parameters())
+            params = params + list(self.mcl_critic.parameters())
 
         if self.learn_logvar:
             print('Diffusion model optimizing logvar')

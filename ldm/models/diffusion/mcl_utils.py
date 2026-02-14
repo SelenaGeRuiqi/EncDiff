@@ -177,23 +177,3 @@ def mcl_loss(loss_type: str,
         return info_nce_from_qk(q, k, tau=tau)
 
     raise ValueError(f"Unknown loss_type: {loss_type}")
-
-
-class ConceptEncoderCritic(nn.Module):
-    """
-    Adapts EncDiff's existing concept_encoder (cond_stage_model) into the
-    critic(x_hat, z, u) interface expected by the unified mcl_loss API.
-
-    critic(x_hat, z, u) = -||concept_encoder(x_hat) - u||^2  (summed over dims)
-
-    This preserves the original MCL mechanism score semantics while conforming
-    to the new unified API.
-    """
-    def __init__(self, concept_encoder_fn):
-        super().__init__()
-        self.concept_encoder_fn = concept_encoder_fn
-
-    def forward(self, x_hat, z, u):
-        u_hat = self.concept_encoder_fn(x_hat)
-        # Mechanism score: negative MSE (same as original mech_score_mse)
-        return -((u_hat - u) ** 2).sum(dim=1)

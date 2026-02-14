@@ -33,79 +33,45 @@ export TMP=/tmp/$USER
 PROJECT_ROOT="/vast/users/guangyi.chen/causal_group/selena/EncDiff"
 CONFIG_DIR="${PROJECT_ROOT}/configs/mcl"
 
-# Pretrained EncDiff checkpoint (with concat, no MCL) - use your checkpoint 2
-PRETRAINED_CKPT="/path/to/your/concat-encdiff/checkpoints/last.ckpt"  # TODO: fill in
-
-# Shapes3D VQ-VAE checkpoint (referenced in config yamls, should already be correct)
-# If your server paths differ from config, override via --base config or edit yamls
+# Pretrained EncDiff checkpoint (with concat, no MCL) for MPI3D
+MPI3D_CKPT="/path/to/your/mpi3d-concat-encdiff/checkpoints/last.ckpt"  # TODO: fill in
 
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 cd "${PROJECT_ROOT}"
 mkdir -p logs/slurm logs/mcl_parallel
 
 echo "[$(date)] PROJECT_ROOT=${PROJECT_ROOT}"
-echo "[$(date)] PRETRAINED_CKPT=${PRETRAINED_CKPT}"
+echo "[$(date)] MPI3D_CKPT=${MPI3D_CKPT}"
 
 ########################################
-# Parallel MCL training: 4 lambdas x 2 datasets = 8 GPUs
-# GPU 0: shapes3d lambda=0.01
-# GPU 1: shapes3d lambda=0.05
-# GPU 2: shapes3d lambda=0.1
-# GPU 3: shapes3d lambda=0.5
-# GPU 4: mpi3d   lambda=0.01
-# GPU 5: mpi3d   lambda=0.05
-# GPU 6: mpi3d   lambda=0.1
-# GPU 7: mpi3d   lambda=0.5
+# MPI3D: 5 loss types x 2 lambdas = 10 runs
+# Round 1: 8 GPUs (5 x lambda=0.01 + 3 x lambda=0.05)
+# Round 2: 2 GPUs (remaining 2 x lambda=0.05)
 #
-# If you only want shapes3d, comment out the mpi3d block
-# and change GPU assignments accordingly.
+# Loss type short names:
+#   nce      = nce_logistic
+#   infonce  = infonce_mechgrad
+#   fisher   = fisher_sm
+#   denoise  = denoise_sm
+#   jacobian = jacobian_vjp_infonce
 ########################################
-
-LAMBDAS=(0.01 0.05 0.1 0.5)
-LAMBDA_STRS=(001 005 010 050)
-
-# ----- Shapes3D (GPUs 0-3) -----
-SHAPES_CKPT="${PRETRAINED_CKPT}"  # concat EncDiff checkpoint for shapes3d
-# If you have separate checkpoints per dataset, set them here:
-# MPI3D_CKPT="/path/to/mpi3d-concat-encdiff/checkpoints/last.ckpt"
-MPI3D_CKPT="${PRETRAINED_CKPT}"
 
 echo ""
 echo "================================================================"
-echo " Launching 8 parallel MCL training runs"
-echo " Shapes3D: GPUs 0-3, lambdas: ${LAMBDAS[*]}"
-echo " MPI3D:    GPUs 4-7, lambdas: ${LAMBDAS[*]}"
+echo " Round 1: 8 parallel MCL runs on MPI3D"
+echo " GPU 0-4: all 5 losses x lambda=0.01"
+echo " GPU 5-7: nce/infonce/fisher x lambda=0.05"
 echo "================================================================"
 
-for i in 0 1 2 3; do
-    lambda=${LAMBDAS[$i]}
-    lambda_str=${LAMBDA_STRS[$i]}
-    gpu_id=$i
-    config="${CONFIG_DIR}/shapes3d-vq-4-16-encdiff-mcl-lambda${lambda_str}.yaml"
-    exp_name="shapes3d-mcl-lambda${lambda_str}"
+# --- Round 1: lambda=0.01 for all 5 losses (GPU 0-4) ---
+LOSS_SHORTS_ALL=(nce infonce fisher denoise jacobian)
+gpu_id=0
+for loss_short in "${LOSS_SHORTS_ALL[@]}"; do
+    config="${CONFIG_DIR}/mpi3d-mcl-${loss_short}-lambda001.yaml"
+    exp_name="mpi3d-${loss_short}-lambda001"
     log_file="logs/mcl_parallel/${exp_name}.log"
 
-    echo "[$(date)] GPU ${gpu_id}: shapes3d lambda=${lambda} -> ${log_file}"
-
-    CUDA_VISIBLE_DEVICES=${gpu_id} python main_val.py \
-        -b "${config}" \
-        -t \
-        --gpus 0, \
-        -r "${SHAPES_CKPT}" \
-        --name "${exp_name}" \
-        > "${log_file}" 2>&1 &
-done
-
-# ----- MPI3D (GPUs 4-7) -----
-for i in 0 1 2 3; do
-    lambda=${LAMBDAS[$i]}
-    lambda_str=${LAMBDA_STRS[$i]}
-    gpu_id=$((i + 4))
-    config="${CONFIG_DIR}/mpi3d-vq-4-16-encdiff-mcl-lambda${lambda_str}.yaml"
-    exp_name="mpi3d-mcl-lambda${lambda_str}"
-    log_file="logs/mcl_parallel/${exp_name}.log"
-
-    echo "[$(date)] GPU ${gpu_id}: mpi3d lambda=${lambda} -> ${log_file}"
+    echo "[$(date)] GPU ${gpu_id}: ${loss_short} lambda=0.01 -> ${log_file}"
 
     CUDA_VISIBLE_DEVICES=${gpu_id} python main_val.py \
         -b "${config}" \
@@ -114,13 +80,65 @@ for i in 0 1 2 3; do
         -r "${MPI3D_CKPT}" \
         --name "${exp_name}" \
         > "${log_file}" 2>&1 &
+
+    gpu_id=$((gpu_id + 1))
+done
+
+# --- Round 1: lambda=0.05 for first 3 losses (GPU 5-7) ---
+LOSS_SHORTS_R1=(nce infonce fisher)
+for loss_short in "${LOSS_SHORTS_R1[@]}"; do
+    config="${CONFIG_DIR}/mpi3d-mcl-${loss_short}-lambda005.yaml"
+    exp_name="mpi3d-${loss_short}-lambda005"
+    log_file="logs/mcl_parallel/${exp_name}.log"
+
+    echo "[$(date)] GPU ${gpu_id}: ${loss_short} lambda=0.05 -> ${log_file}"
+
+    CUDA_VISIBLE_DEVICES=${gpu_id} python main_val.py \
+        -b "${config}" \
+        -t \
+        --gpus 0, \
+        -r "${MPI3D_CKPT}" \
+        --name "${exp_name}" \
+        > "${log_file}" 2>&1 &
+
+    gpu_id=$((gpu_id + 1))
 done
 
 echo ""
-echo "[$(date)] All 8 training runs launched. Waiting for completion..."
+echo "[$(date)] Round 1: 8 runs launched. Waiting..."
 wait
 
 echo ""
-echo "[$(date)] All runs finished."
+echo "================================================================"
+echo " Round 2: 2 remaining runs (denoise/jacobian x lambda=0.05)"
+echo "================================================================"
+
+# --- Round 2: lambda=0.05 for remaining 2 losses (GPU 0-1) ---
+LOSS_SHORTS_R2=(denoise jacobian)
+gpu_id=0
+for loss_short in "${LOSS_SHORTS_R2[@]}"; do
+    config="${CONFIG_DIR}/mpi3d-mcl-${loss_short}-lambda005.yaml"
+    exp_name="mpi3d-${loss_short}-lambda005"
+    log_file="logs/mcl_parallel/${exp_name}.log"
+
+    echo "[$(date)] GPU ${gpu_id}: ${loss_short} lambda=0.05 -> ${log_file}"
+
+    CUDA_VISIBLE_DEVICES=${gpu_id} python main_val.py \
+        -b "${config}" \
+        -t \
+        --gpus 0, \
+        -r "${MPI3D_CKPT}" \
+        --name "${exp_name}" \
+        > "${log_file}" 2>&1 &
+
+    gpu_id=$((gpu_id + 1))
+done
+
+echo ""
+echo "[$(date)] Round 2: 2 runs launched. Waiting..."
+wait
+
+echo ""
+echo "[$(date)] All 10 runs finished."
 echo "Check logs in: logs/mcl_parallel/"
 echo "Check WandB:   https://wandb.ai/sege-uc-san-diego/EncDiff-MCL"
